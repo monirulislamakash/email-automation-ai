@@ -1,0 +1,36 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: email-automation-app
+    command: python app.py
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      # Same path as local code: src/database/session.py → database.db in this directory.
+      - ./src/database:/app/src/database
+      - logs_data:/app/logs
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: email-automation-worker
+    command: python main.py
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./src/database:/app/src/database
+      - logs_data:/app/logs
+    restart: unless-stopped
+    depends_on:
+      - app
+
+volumes:
+  logs_data:
