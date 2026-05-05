@@ -171,8 +171,20 @@ def playground(current_user):
 
         print("Playground request data:", get_data)
         print(request.files)
-        thread_id = get_data.get("thread_id").strip()
-        reply_text = get_data.get("reply_text").strip()
+        thread_id = (get_data.get("thread_id") or "").strip()
+        reply_text = (get_data.get("reply_text") or "").strip()
+        if not thread_id or not reply_text:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": "thread_id and reply_text are required",
+                        "thread_id": thread_id or None,
+                        "data": None,
+                    }
+                ),
+                400,
+            )
         estimated_human_time, reply_mail = call_reply_agent(client_reply=reply_text, thread_id=thread_id)
         return (
             jsonify(

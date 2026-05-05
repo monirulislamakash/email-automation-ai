@@ -331,7 +331,7 @@ def lead_details(current_user):
         return jsonify({"success": False, "message": f"Error fetching lead details: {str(e)}"}), 500
 
 
-@lead.route("/api/lead/update/", methods=["PUT"])
+@lead.route("/api/lead/update/", methods=["PUT", "POST"], strict_slashes=False)
 @token_required
 def lead_update(current_user):
     try:
@@ -341,49 +341,78 @@ def lead_update(current_user):
             return jsonify({"message": "Missing JSON data"}), 400
 
         lead_id = data.get("lead_id")
-        if not lead_id:
-            return jsonify({"message": "lead_id is required"}), 400
+        db_id = data.get("db_id", data.get("id"))
+        if isinstance(lead_id, str):
+            lead_id = lead_id.strip() or None
+        if isinstance(db_id, str):
+            db_id = db_id.strip()
+            db_id = int(db_id) if db_id.isdigit() else None
+        elif isinstance(db_id, (int, float)):
+            db_id = int(db_id)
+        else:
+            db_id = None
 
-        lead = get_lead_by_lead_id(lead_id)
-        if not lead:
+        if not lead_id and db_id is None:
+            return jsonify({"message": "lead_id or db_id is required"}), 400
+
+        db_lead = None
+        if lead_id:
+            db_lead = get_lead_by_lead_id(lead_id)
+            if not db_lead and isinstance(lead_id, str) and lead_id.isdigit():
+                db_lead = get_lead_by_db_id(int(lead_id))
+        if db_lead is None and db_id is not None:
+            db_lead = get_lead_by_db_id(db_id)
+        if not db_lead:
             return jsonify({"message": "Lead not found"}), 404
-        update_lead(
-            lead_id=lead_id,
+
+        ok = update_lead(
+            db_id=db_lead.id,
             first_name=data.get("first_name"),
             last_name=data.get("last_name"),
             title=data.get("title"),
             company=data.get("company"),
             conference=data.get("conference"),
             type=data.get("type"),
-            # email=data.get("email"),
+            email=data.get("email"),
             linkedin=data.get("linkedin"),
             website=data.get("website"),
         )
-        update_instantly_lead(
-            lead_id=lead_id,
-            lead_email=data.get("email"),
-            first_name=data.get("first_name"),
-            last_name=data.get("last_name"),
-        )
+        if not ok:
+            return jsonify({"success": False, "message": "Could not save lead changes. Try again."}), 500
+
+        if db_lead.lead_id:
+            try:
+                update_instantly_lead(
+                    lead_id=db_lead.lead_id,
+                    lead_email=data.get("email") or db_lead.email or "",
+                    first_name=data.get("first_name") or "",
+                    last_name=data.get("last_name") or "",
+                )
+            except Exception as instantly_err:
+                print(f"Instantly lead update failed (db id={db_lead.id}): {instantly_err}")
+
+        refreshed = get_lead_by_db_id(db_lead.id)
+        if not refreshed:
+            return jsonify({"success": False, "message": "Lead not found after update"}), 404
 
         updated_lead = {
-            "id": lead.id,
-            "lead_id": lead.lead_id,
-            "first_name": lead.first_name,
-            "last_name": lead.last_name,
-            "full_name": f"{lead.first_name} {lead.last_name}".strip(),
-            "title": lead.title,
-            "company": lead.company,
-            "conference": lead.conference,
-            "type": lead.type,
-            "email": lead.email,
-            "linkedin": lead.linkedin,
-            "website": lead.website,
-            "campaign_id": lead.campaign_id,
-            "lead_status": lead.lead_status,
-            "email_status": lead.email_status,
-            "email_id": lead.email_id,
-            "reply_mail": lead.reply_mail,
+            "id": refreshed.id,
+            "lead_id": refreshed.lead_id,
+            "first_name": refreshed.first_name,
+            "last_name": refreshed.last_name,
+            "full_name": f"{refreshed.first_name or ''} {refreshed.last_name or ''}".strip(),
+            "title": refreshed.title,
+            "company": refreshed.company,
+            "conference": refreshed.conference,
+            "type": refreshed.type,
+            "email": refreshed.email,
+            "linkedin": refreshed.linkedin,
+            "website": refreshed.website,
+            "campaign_id": refreshed.campaign_id,
+            "lead_status": refreshed.lead_status,
+            "email_status": refreshed.email_status,
+            "email_id": refreshed.email_id,
+            "reply_mail": refreshed.reply_mail,
         }
 
         return jsonify({"success": True, "message": "Lead updated successfully", "data": updated_lead}), 200
