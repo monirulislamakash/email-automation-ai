@@ -62,6 +62,8 @@ def create_app() -> Flask:
             "/api/auth/login/",
             "/api/auth/register",
             "/api/auth/register/",
+            "/api/notification/",
+            "/api/notification",
             "/instantly-webhook",
             "/instantly-webhook/",
         }

@@ -26,6 +26,38 @@ from src.database.services.prompt_services import (
 
 prompt = Blueprint("prompt", __name__)
 
+def _extract_prompt_content_from_request(data: dict) -> str:
+    """Accept either raw text prompt_value or uploaded file content.
+
+    Old app UI allowed uploading .txt or .docx. Current backend previously assumed
+    all uploads were docx/base64 which breaks .txt uploads.
+    """
+    if not isinstance(data, dict):
+        return ""
+
+    file_content = data.get("file_content")
+    file_name = data.get("file_name") or ""
+    file_type = data.get("file_type") or ""
+    if not file_content:
+        return data.get("prompt_content") or data.get("prompt_value") or ""
+
+    file_name_l = str(file_name).lower()
+    file_type_l = str(file_type).lower()
+
+    # Treat plain text uploads as literal prompt body.
+    if file_type_l.startswith("text/") or file_name_l.endswith(".txt"):
+        return str(file_content)
+
+    # Default: assume a base64 data URL (docx).
+    try:
+        base64_str = re.sub("^data:.*;base64,", "", str(file_content))
+        file_bytes = base64.b64decode(base64_str)
+        doc = Document(BytesIO(file_bytes))
+        return "\n".join([para.text for para in doc.paragraphs])
+    except Exception as e:
+        print("Failed to parse uploaded prompt file; falling back to prompt_value.", e)
+        return data.get("prompt_content") or data.get("prompt_value") or ""
+
 
 @prompt.route("/api/add/prompt/", methods=["POST"])
 @token_required
@@ -37,19 +69,7 @@ def add_prompt(current_user):
             return jsonify({"message": "Missing JSON data"}), 400
         print(data)
         prompt_type = data.get("prompt_type") or data.get("prompt_name")
-        file_content = data.get('file_content')
-        file_name = data.get('file_name')
-        file_type = data.get('file_type')
-        if file_content and file_name:
-            print(f"File received: {file_name} (type: {file_type})")
-            # print(f"File content: {file_content[:50]}....")
-            base64_str = re.sub("^data:.*;base64,", "", file_content)
-            file_bytes = base64.b64decode(base64_str)
-            doc = Document(BytesIO(file_bytes))
-            prompt_content = "\n".join([para.text for para in doc.paragraphs])
-        else:
-            print("No file uploaded. Text data received.")
-            prompt_content = data.get("prompt_content") or data.get("prompt_value")
+        prompt_content = _extract_prompt_content_from_request(data)
 
         campaign_id = data.get("campaign_id")
         if campaign_id is None or campaign_id == "":
@@ -166,15 +186,7 @@ def prompt_update(current_user):
             return jsonify({"message": "Missing JSON data"}), 400
         print(data)
         prompt_type = data.get("prompt_type") or data.get("prompt_name")
-        if "file_content" in data.keys():
-            file_content = data["file_content"]
-            print("Received prompt as file: ", data["file_name"])
-            base64_str = re.sub("^data:.*;base64,", "", file_content)
-            file_bytes = base64.b64decode(base64_str)
-            doc = Document(BytesIO(file_bytes))
-            prompt_content = "\n".join([para.text for para in doc.paragraphs])
-        else:
-            prompt_content = data.get("prompt_content") or data.get("prompt_value")
+        prompt_content = _extract_prompt_content_from_request(data)
 
         campaign_id = data.get("campaign_id")
         if campaign_id is None or campaign_id == "":

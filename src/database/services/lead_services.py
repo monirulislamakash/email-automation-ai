@@ -4,6 +4,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.database.session import get_session
 from src.database.models.leads import Leads
+from src.database.models.campaigns import Campaigns
 
 
 def add_lead_db(
@@ -93,6 +94,30 @@ def get_leads_by_campaign(campaign_id: str) -> Leads:
         lead = session.query(Leads).filter_by(campaign_id=campaign_id).first()
         return lead
     return None
+
+
+def get_master_campaign_by_instantly_campaign_id(instantly_campaign_id: str) -> Optional[Campaigns]:
+    """Resolve an Instantly campaign id back to the master DB campaign.
+
+    This supports frontend flows that accidentally reuse a returned Instantly campaign id
+    as the next request's campaign_id during multi-lead uploads.
+    """
+    instantly_campaign_id = str(instantly_campaign_id or "").strip()
+    if not instantly_campaign_id:
+        return None
+
+    with get_session() as session:
+        lead = (
+            session.query(Leads)
+            .filter_by(campaign_id=instantly_campaign_id)
+            .order_by(Leads.id.desc())
+            .first()
+        )
+        if not lead:
+            return None
+
+        campaign = session.query(Campaigns).filter_by(id=lead.campaign_pk).first()
+        return campaign
 
 
 def change_lead_id(id: int, new_lead_id: str, new_campaign_id: str):

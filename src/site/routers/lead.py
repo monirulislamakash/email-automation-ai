@@ -13,6 +13,7 @@ from src.database.models import Leads
 from src.email.lead_manager import create_lead, delete_lead, update_instantly_lead
 from src.email.campaign_manager import create_campaign as create_instantly_campaign
 from src.database.services.campaign_services import get_campaign, get_campaign_db_id, get_all_campaigns, update_db_campaign
+from src.database.services.lead_services import get_master_campaign_by_instantly_campaign_id
 
 lead = Blueprint("lead", __name__)
 
@@ -26,6 +27,16 @@ def _resolve_campaign_for_request(requested_campaign_id):
     campaign = get_campaign(requested_campaign_id)
     if campaign:
         return campaign
+
+    # If the request passes an Instantly campaign id (common when the frontend reuses
+    # a returned campaign_id across a multi-lead upload), resolve back to the master
+    # campaign via an existing lead row.
+    try:
+        campaign = get_master_campaign_by_instantly_campaign_id(str(requested_campaign_id or "").strip())
+        if campaign:
+            return campaign
+    except Exception as e:
+        print(f"Campaign resolve via leads failed for '{requested_campaign_id}': {e}")
 
     # Backward compatibility: some requests may pass the external Instantly id.
     all_campaigns = get_all_campaigns() or []
@@ -109,102 +120,102 @@ def lead_create(current_user):
         lead_master_campaign = _resolve_campaign_for_request(requested_campaign_id)
         if not lead_master_campaign:
             return jsonify({"success": False, "message": "Campaign not found"}), 404
+        # OLD-BEHAVIOR MODE:
+        # Create a NEW Instantly campaign for each lead (using the master campaign's schedule/options),
+        # then create the lead under that newly created campaign, and persist both ids in our DB.
+        first_name = (data.get("first_name") or "").strip()
+        lead_email = (data.get("email") or "").strip()
 
-        # Ensure we have a valid Instantly campaign id.
-        campaign_options = lead_master_campaign.options_settings if isinstance(lead_master_campaign.options_settings, dict) else {}
-        instantly_campaign_id = str(campaign_options.get("instantly_campaign_id") or "").strip()
-        if not instantly_campaign_id:
-            campaign_id_text = str(lead_master_campaign.campaign_id or "").strip()
-            if campaign_id_text and not _looks_like_uuid(campaign_id_text):
-                instantly_campaign_id = campaign_id_text
+        master_campaign_id = str(lead_master_campaign.campaign_id or "").strip()
+
         try:
-            if not instantly_campaign_id:
-                instantly_response = create_instantly_campaign(
-                    campaign_name=lead_master_campaign.campaign_name,
-                    schedules=lead_master_campaign.campaign_schedule or {},
-                    options_settings=lead_master_campaign.options_settings or {},
-                )
-                new_instantly_campaign_id = instantly_response.get("id")
-                if not new_instantly_campaign_id:
-                    detail = instantly_response.get("message") or instantly_response.get("error") or instantly_response.get("detail")
-                    return (
-                        jsonify(
-                            {
-                                "success": False,
-                                "message": f"Failed to create campaign in Instantly. {detail}" if detail else "Failed to create campaign in Instantly. Check Instantly API key and campaign settings.",
-                                "instantly_response": instantly_response,
-                            }
-                        ),
-                        502,
-                    )
-                instantly_campaign_id = new_instantly_campaign_id
-                updated_options = dict(campaign_options)
-                updated_options["instantly_campaign_id"] = instantly_campaign_id
-                update_db_campaign(campaign_id=lead_master_campaign.campaign_id, options_settings=updated_options)
+            instantly_campaign = create_instantly_campaign(
+                campaign_name=f"{lead_master_campaign.campaign_name} - {first_name or lead_email}",
+                schedules=lead_master_campaign.campaign_schedule or {},
+                options_settings=lead_master_campaign.options_settings or {},
+            )
         except Exception as e:
-            return jsonify({"success": False, "message": f"Failed to provision Instantly campaign: {str(e)}"}), 500
+            return jsonify({"success": False, "message": f"Failed to create Instantly campaign for lead: {str(e)}"}), 502
 
-        # Create the lead in our DB first (to ensure dedupe + UI visibility),
-        # but store Instantly campaign id in `Leads.campaign_id`.
+        instantly_campaign_id = str((instantly_campaign or {}).get("id") or "").strip()
+        if not instantly_campaign_id:
+            detail = (instantly_campaign or {}).get("message") or (instantly_campaign or {}).get("error") or (instantly_campaign or {}).get("detail")
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": f"Failed to create Instantly campaign for lead. {detail}" if detail else "Failed to create Instantly campaign for lead.",
+                        "instantly_response": instantly_campaign,
+                    }
+                ),
+                502,
+            )
+
+        try:
+            instantly_lead = create_lead(
+                campaign_id=instantly_campaign_id,
+                lead_email=lead_email,
+                first_name=first_name,
+                last_name=(data.get("last_name") or "").strip(),
+            )
+        except Exception as e:
+            return jsonify({"success": False, "message": f"Instantly lead creation failed: {str(e)}"}), 502
+
+        instantly_lead_id = _extract_instantly_lead_id(instantly_lead)
+        if not instantly_lead_id:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": "Instantly lead creation failed (missing lead id).",
+                        "instantly_response": instantly_lead,
+                    }
+                ),
+                502,
+            )
+
+        lead_status_raw = (instantly_lead or {}).get("status")
+        try:
+            lead_status_value = int(lead_status_raw) if lead_status_raw is not None else 1
+        except Exception:
+            lead_status_value = 1
+
         new_lead = add_lead_db(
             campaign_pk=lead_master_campaign.id,
             campaign_id=instantly_campaign_id,
-            email=data.get("email"),
-            first_name=data.get("first_name"),
-            last_name=data.get("last_name"),
+            email=lead_email,
+            first_name=first_name or None,
+            last_name=(data.get("last_name") or "").strip() or None,
             title=data.get("title"),
             company=data.get("company"),
             conference=data.get("conference"),
             type=data.get("type"),
             linkedin=data.get("linkedin"),
             website=data.get("website"),
-            lead_id=None,
-            lead_status=1,
+            lead_id=instantly_lead_id,
+            lead_status=lead_status_value,
         )
         if not new_lead:
             return jsonify({"success": False, "message": "Lead with this email already exists for this campaign"}), 400
 
-        # Now create lead in Instantly and persist the returned lead id + initial statuses.
-        try:
-            instantly_lead = create_lead(
-                campaign_id=instantly_campaign_id,
-                lead_email=new_lead.email,
-                first_name=new_lead.first_name or "",
-                last_name=new_lead.last_name or "",
-            )
-            instantly_lead_id = _extract_instantly_lead_id(instantly_lead)
-            if instantly_lead_id:
-                update_lead(
-                    db_id=new_lead.id,
-                    lead_id=instantly_lead_id,
-                    lead_status=1,
-                    email_status="NOT Yet Contacted",
-                )
-                return (
-                    jsonify(
-                        {
-                            "success": True,
-                            "message": "Lead created successfully",
-                            "data": {"id": new_lead.id, "lead_id": instantly_lead_id, "campaign_id": instantly_campaign_id},
-                        }
-                    ),
-                    201,
-                )
-            # If Instantly didn't return an id, mark as processing/error for visibility.
-            update_lead(db_id=new_lead.id, lead_status=0, email_status="PROCESSING")
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "message": "Lead saved locally but Instantly lead creation failed.",
-                        "instantly_response": instantly_lead,
-                    }
-                ),
-                502,
-            )
-        except Exception as e:
-            update_lead(db_id=new_lead.id, lead_status=0, email_status="PROCESSING")
-            return jsonify({"success": False, "message": f"Lead saved locally but Instantly call failed: {str(e)}"}), 502
+        update_lead(db_id=new_lead.id, email_status="NOT Yet Contacted")
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "message": "Lead created successfully",
+                    # Keep returning the MASTER campaign id so multi-lead uploads
+                    # (bulk/manual) don't accidentally start using an Instantly id.
+                    "data": {
+                        "id": new_lead.id,
+                        "lead_id": instantly_lead_id,
+                        "campaign_id": master_campaign_id or requested_campaign_id,
+                        "instantly_campaign_id": instantly_campaign_id,
+                    },
+                }
+            ),
+            201,
+        )
 
     except Exception as e:
         print(e)

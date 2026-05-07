@@ -129,8 +129,7 @@ def instantly_webhook():
 
 
 @webhook.route("/api/notification/", methods=["GET"])
-@token_required
-def notification(current_user):
+def notification():
     try:
         notifications = get_all_notifications()
 
